@@ -134,6 +134,7 @@ export class ClaudeSubprocess extends EventEmitter {
       "stream-json", // JSON streaming output
       "--verbose", // Required for stream-json
       "--include-partial-messages", // Enable streaming chunks
+      "--dangerously-skip-permissions", // Run without interactive permission prompts
       "--model",
       options.model, // Model alias (opus/sonnet/haiku)
       "--no-session-persistence", // Don't save sessions
