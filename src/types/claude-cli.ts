@@ -52,10 +52,21 @@ export interface ClaudeCliAssistantRedactedThinkingContent {
   data?: string;
 }
 
+export interface ClaudeCliAssistantToolUseContent {
+  type: "tool_use";
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+  caller?: {
+    type: string;
+  };
+}
+
 export type ClaudeCliAssistantContent =
   | ClaudeCliAssistantTextContent
   | ClaudeCliAssistantThinkingContent
-  | ClaudeCliAssistantRedactedThinkingContent;
+  | ClaudeCliAssistantRedactedThinkingContent
+  | ClaudeCliAssistantToolUseContent;
 
 export interface ClaudeCliAssistant {
   type: "assistant";
@@ -121,6 +132,9 @@ export interface ClaudeCliStreamEvent {
       type: "summary_text_delta";
       text: string;
     } | {
+      type: "input_json_delta";
+      partial_json: string;
+    } | {
       type: "signature_delta";
       signature: string;
     };
@@ -134,6 +148,14 @@ export interface ClaudeCliStreamEvent {
     } | {
       type: "redacted_thinking";
       data?: string;
+    } | {
+      type: "tool_use";
+      id: string;
+      name: string;
+      input: Record<string, unknown>;
+      caller?: {
+        type: string;
+      };
     };
     message?: {
       model: string;
@@ -151,11 +173,29 @@ export interface ClaudeCliStreamEvent {
   uuid: string;
 }
 
+export interface ClaudeCliUserToolResultContent {
+  type: "tool_result";
+  tool_use_id: string;
+  content: string;
+  is_error: boolean;
+}
+
+export interface ClaudeCliUser {
+  type: "user";
+  message: {
+    role: "user";
+    content: ClaudeCliUserToolResultContent[];
+  };
+  session_id: string;
+  uuid: string;
+}
+
 export type ClaudeCliMessage =
   | ClaudeCliInit
   | ClaudeCliHookStarted
   | ClaudeCliHookResponse
   | ClaudeCliAssistant
+  | ClaudeCliUser
   | ClaudeCliResult
   | ClaudeCliStreamEvent
   | ClaudeCliSystemMessage;
@@ -193,4 +233,8 @@ export function extractThinkingDelta(msg: ClaudeCliStreamEvent): string | null {
 
 export function isSystemInit(msg: ClaudeCliMessage): msg is ClaudeCliInit {
   return msg.type === "system" && (msg as ClaudeCliSystemMessage).subtype === "init";
+}
+
+export function isUserMessage(msg: ClaudeCliMessage): msg is ClaudeCliUser {
+  return msg.type === "user";
 }

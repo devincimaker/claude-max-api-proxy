@@ -14,8 +14,14 @@ import {
   extractThinkingContent,
 } from "../adapter/cli-to-openai.js";
 import type { OpenAIChatRequest } from "../types/openai.js";
-import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
-import { extractTextDelta, extractThinkingDelta } from "../types/claude-cli.js";
+import type {
+  ClaudeCliAssistant,
+  ClaudeCliMessage,
+  ClaudeCliResult,
+  ClaudeCliStreamEvent,
+  ClaudeCliUser,
+} from "../types/claude-cli.js";
+import { extractTextDelta, extractThinkingDelta, isUserMessage } from "../types/claude-cli.js";
 
 /**
  * Handle POST /v1/chat/completions
@@ -99,6 +105,39 @@ async function handleStreamingResponse(
     let isFirst = true;
     let lastModel = "claude-sonnet-4";
     let isComplete = false;
+    const activeToolCalls = new Map<number, {
+      id: string;
+      name: string;
+      initialInput: Record<string, unknown>;
+      inputChunks: string[];
+      sawInputDelta: boolean;
+    }>();
+
+    const writeChunk = (text?: string, reasoning?: string): void => {
+      if ((!text && !reasoning) || res.writableEnded) {
+        return;
+      }
+
+      const chunk = {
+        id: `chatcmpl-${requestId}`,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: lastModel,
+        choices: [{
+          index: 0,
+          delta: {
+            role: isFirst ? "assistant" : undefined,
+            content: text || undefined,
+            reasoning: reasoning || undefined,
+            reasoning_content: reasoning || undefined,
+          },
+          finish_reason: null,
+        }],
+      };
+
+      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      isFirst = false;
+    };
 
     // Handle actual client disconnect (response stream closed)
     res.on("close", () => {
@@ -114,25 +153,63 @@ async function handleStreamingResponse(
       const text = extractTextDelta(event);
       const reasoning = extractThinkingDelta(event);
 
-      if ((text || reasoning) && !res.writableEnded) {
-        const chunk = {
-          id: `chatcmpl-${requestId}`,
-          object: "chat.completion.chunk",
-          created: Math.floor(Date.now() / 1000),
-          model: lastModel,
-          choices: [{
-            index: 0,
-            delta: {
-              role: isFirst ? "assistant" : undefined,
-              content: text || undefined,
-              reasoning: reasoning || undefined,
-              reasoning_content: reasoning || undefined,
-            },
-            finish_reason: null,
-          }],
-        };
-        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-        isFirst = false;
+      writeChunk(text || undefined, reasoning || undefined);
+    });
+
+    // Surface Claude internal tool activity as reasoning so clients can display progress.
+    subprocess.on("message", (message: ClaudeCliMessage) => {
+      if (message.type === "stream_event") {
+        const event = message.event;
+
+        if (
+          event.type === "content_block_start" &&
+          event.content_block?.type === "tool_use" &&
+          typeof event.index === "number"
+        ) {
+          activeToolCalls.set(event.index, {
+            id: event.content_block.id,
+            name: event.content_block.name,
+            initialInput: event.content_block.input || {},
+            inputChunks: [],
+            sawInputDelta: false,
+          });
+          writeChunk(undefined, `\n[claude tool:start] ${event.content_block.name} (${event.content_block.id})\n`);
+          return;
+        }
+
+        if (
+          event.type === "content_block_delta" &&
+          event.delta?.type === "input_json_delta" &&
+          typeof event.index === "number"
+        ) {
+          const state = activeToolCalls.get(event.index);
+          if (state) {
+            state.inputChunks.push(event.delta.partial_json);
+            if (!state.sawInputDelta && event.delta.partial_json.trim()) {
+              state.sawInputDelta = true;
+              writeChunk(undefined, `[claude tool:args] ${state.name} building input...\n`);
+            }
+          }
+          return;
+        }
+
+        if (event.type === "content_block_stop" && typeof event.index === "number") {
+          const state = activeToolCalls.get(event.index);
+          if (state) {
+            const renderedInput = renderToolInput(state.initialInput, state.inputChunks);
+            writeChunk(undefined, `[claude tool:call] ${state.name} ${renderedInput}\n`);
+            activeToolCalls.delete(event.index);
+          }
+        }
+        return;
+      }
+
+      if (isUserMessage(message)) {
+        for (const item of message.message.content) {
+          const snippet = truncateToolText(item.content);
+          const label = item.is_error ? "tool error" : "tool result";
+          writeChunk(undefined, `[claude ${label}] ${item.tool_use_id}: ${snippet}\n`);
+        }
       }
     });
 
@@ -214,6 +291,23 @@ async function handleNonStreamingResponse(
       if (reasoning) {
         reasoningParts.push(reasoning);
       }
+
+      for (const content of message.message.content) {
+        if (content.type !== "tool_use") {
+          continue;
+        }
+        reasoningParts.push(
+          `[claude tool:call] ${content.name} ${safeJson(content.input)}`
+        );
+      }
+    });
+
+    subprocess.on("message", (message: ClaudeCliMessage) => {
+      if (!isUserMessage(message)) {
+        return;
+      }
+
+      appendUserToolResults(reasoningParts, message);
     });
 
     subprocess.on("error", (error: Error) => {
@@ -261,6 +355,44 @@ async function handleNonStreamingResponse(
         resolve();
       });
   });
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "{}";
+  }
+}
+
+function renderToolInput(
+  initialInput: Record<string, unknown>,
+  inputChunks: string[]
+): string {
+  const rawInput = inputChunks.join("");
+  if (rawInput.trim()) {
+    try {
+      return JSON.stringify(JSON.parse(rawInput));
+    } catch {
+      return rawInput;
+    }
+  }
+  return safeJson(initialInput);
+}
+
+function truncateToolText(value: string, maxLength: number = 280): string {
+  const clean = value.replace(/\s+/g, " ").trim();
+  if (clean.length <= maxLength) {
+    return clean;
+  }
+  return `${clean.slice(0, maxLength)}...`;
+}
+
+function appendUserToolResults(target: string[], message: ClaudeCliUser): void {
+  for (const content of message.message.content) {
+    const label = content.is_error ? "tool error" : "tool result";
+    target.push(`[claude ${label}] ${content.tool_use_id}: ${truncateToolText(content.content)}`);
+  }
 }
 
 /**
