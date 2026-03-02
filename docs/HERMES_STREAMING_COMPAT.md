@@ -8,6 +8,25 @@ It is based on the working patch applied to:
 
 - `/Users/devinci/.hermes/hermes-agent/run_agent.py`
 
+Patch artifact in this repo:
+
+- `docs/patches/hermes-chat-streaming.patch`
+
+## Quick apply (one command)
+
+From your Hermes checkout:
+
+```bash
+cd ~/.hermes/hermes-agent
+git apply /Users/devinci/Code/claude-api-proxy/docs/patches/hermes-chat-streaming.patch
+```
+
+Then validate syntax:
+
+```bash
+python3 -m py_compile run_agent.py
+```
+
 ## Why this patch is needed
 
 By default, Hermes often uses non-stream chat completions (`stream=False`) and

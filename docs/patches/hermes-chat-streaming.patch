@@ -1,0 +1,259 @@
+diff --git a/run_agent.py b/run_agent.py
+index 65dd3c2..003975d 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -133,6 +133,7 @@ class AIAgent:
+         max_tokens: int = None,
+         reasoning_config: Dict[str, Any] = None,
+         prefill_messages: List[Dict[str, Any]] = None,
++        stream_chat_completions: Optional[bool] = None,
+         platform: str = None,
+         skip_context_files: bool = False,
+         skip_memory: bool = False,
+@@ -172,6 +173,9 @@ class AIAgent:
+             prefill_messages (List[Dict]): Messages to prepend to conversation history as prefilled context.
+                 Useful for injecting a few-shot example or priming the model's response style.
+                 Example: [{"role": "user", "content": "Hi!"}, {"role": "assistant", "content": "Hello!"}]
++            stream_chat_completions (Optional[bool]): Stream chat-completions responses and aggregate deltas
++                client-side. If None, defaults to True for CLI and False for non-CLI platforms. Can be overridden
++                globally via HERMES_CHAT_STREAM=true/false.
+             platform (str): The interface platform the user is on (e.g. "cli", "telegram", "discord", "whatsapp").
+                 Used to inject platform-specific formatting hints into the system prompt.
+             skip_context_files (bool): If True, skip auto-injection of SOUL.md, AGENTS.md, and .cursorrules
+@@ -239,6 +243,15 @@ class AIAgent:
+         self.max_tokens = max_tokens  # None = use model default
+         self.reasoning_config = reasoning_config  # None = use default (xhigh for OpenRouter)
+         self.prefill_messages = prefill_messages or []  # Prefilled conversation turns
++        env_stream_mode = os.getenv("HERMES_CHAT_STREAM", "").strip().lower()
++        if stream_chat_completions is not None:
++            self.stream_chat_completions = bool(stream_chat_completions)
++        elif env_stream_mode in {"1", "true", "yes", "on"}:
++            self.stream_chat_completions = True
++        elif env_stream_mode in {"0", "false", "no", "off"}:
++            self.stream_chat_completions = False
++        else:
++            self.stream_chat_completions = self.platform == "cli"
+         
+         # Anthropic prompt caching: auto-enabled for Claude models via OpenRouter.
+         # Reduces input costs by ~75% on multi-turn conversations by caching the
+@@ -1985,6 +1998,192 @@ class AIAgent:
+ 
+         return True
+ 
++    def _extract_reasoning_delta_text(self, delta: Any) -> str:
++        """Extract reasoning text from a chat-completions stream delta."""
++        parts: List[str] = []
++
++        for attr in ("reasoning", "reasoning_content"):
++            val = getattr(delta, attr, None)
++            if isinstance(val, str) and val:
++                if not parts or parts[-1] != val:
++                    parts.append(val)
++
++        details = getattr(delta, "reasoning_details", None)
++        if isinstance(details, list):
++            for detail in details:
++                text = None
++                if isinstance(detail, dict):
++                    text = detail.get("text") or detail.get("summary") or detail.get("content")
++                else:
++                    text = (
++                        getattr(detail, "text", None)
++                        or getattr(detail, "summary", None)
++                        or getattr(detail, "content", None)
++                    )
++                if isinstance(text, str) and text:
++                    if not parts or parts[-1] != text:
++                        parts.append(text)
++
++        return "".join(parts)
++
++    def _flush_live_reasoning_buffer(self, buffer: str, *, force: bool = False) -> str:
++        """Render buffered reasoning in readable lines during streaming."""
++        while "\n" in buffer:
++            line, buffer = buffer.split("\n", 1)
++            line = line.strip()
++            if line:
++                print(f"  ┊ 🧠 {line}")
++
++        # Also flush long single-line buffers periodically so users see progress.
++        chunk_size = 140
++        while len(buffer) >= chunk_size:
++            line = buffer[:chunk_size].strip()
++            buffer = buffer[chunk_size:]
++            if line:
++                print(f"  ┊ 🧠 {line}")
++
++        if force:
++            tail = buffer.strip()
++            if tail:
++                print(f"  ┊ 🧠 {tail}")
++            return ""
++
++        return buffer
++
++    def _stream_chat_completions_call(self, api_kwargs: dict):
++        """
++        Run a chat-completions request in streaming mode and synthesize a final response object.
++
++        This preserves compatibility with the existing non-stream processing path while enabling
++        live visibility into reasoning deltas.
++        """
++        stream_kwargs = dict(api_kwargs)
++        stream_kwargs["stream"] = True
++
++        stream = self.client.chat.completions.create(**stream_kwargs)
++
++        model_name = self.model
++        usage = None
++        finish_reason = "stop"
++        content_parts: List[str] = []
++        reasoning_parts: List[str] = []
++        tool_call_parts: Dict[int, Dict[str, str]] = {}
++
++        show_live_reasoning = bool(self.quiet_mode and self.platform == "cli")
++        live_reasoning_started = False
++        live_reasoning_buffer = ""
++
++        try:
++            for chunk in stream:
++                if self._interrupt_requested:
++                    raise InterruptedError("Agent interrupted during streamed API call")
++
++                chunk_model = getattr(chunk, "model", None)
++                if isinstance(chunk_model, str) and chunk_model:
++                    model_name = chunk_model
++
++                chunk_usage = getattr(chunk, "usage", None)
++                if chunk_usage is not None:
++                    usage = chunk_usage
++
++                choices = getattr(chunk, "choices", None) or []
++                for choice in choices:
++                    choice_finish = getattr(choice, "finish_reason", None)
++                    if choice_finish is not None:
++                        finish_reason = choice_finish
++
++                    delta = getattr(choice, "delta", None)
++                    if delta is None:
++                        continue
++
++                    reasoning_piece = self._extract_reasoning_delta_text(delta)
++                    if reasoning_piece:
++                        reasoning_parts.append(reasoning_piece)
++                        if show_live_reasoning:
++                            if not live_reasoning_started:
++                                print("  ┊ 🧠 Thinking (live):")
++                                live_reasoning_started = True
++                            live_reasoning_buffer += reasoning_piece
++                            live_reasoning_buffer = self._flush_live_reasoning_buffer(live_reasoning_buffer)
++
++                    content_piece = getattr(delta, "content", None)
++                    if isinstance(content_piece, str) and content_piece:
++                        content_parts.append(content_piece)
++
++                    tool_deltas = getattr(delta, "tool_calls", None)
++                    if tool_deltas:
++                        for tool_delta in tool_deltas:
++                            idx = getattr(tool_delta, "index", None)
++                            if not isinstance(idx, int):
++                                idx = len(tool_call_parts)
++
++                            acc = tool_call_parts.setdefault(idx, {
++                                "id": "",
++                                "name": "",
++                                "arguments": "",
++                            })
++
++                            tc_id = getattr(tool_delta, "id", None)
++                            if isinstance(tc_id, str) and tc_id.strip():
++                                acc["id"] = tc_id.strip()
++
++                            fn = getattr(tool_delta, "function", None)
++                            if fn is not None:
++                                name_piece = getattr(fn, "name", None)
++                                if isinstance(name_piece, str) and name_piece:
++                                    acc["name"] += name_piece
++
++                                args_piece = getattr(fn, "arguments", None)
++                                if isinstance(args_piece, str) and args_piece:
++                                    acc["arguments"] += args_piece
++        finally:
++            if show_live_reasoning and live_reasoning_started:
++                self._flush_live_reasoning_buffer(live_reasoning_buffer, force=True)
++            close_fn = getattr(stream, "close", None)
++            if callable(close_fn):
++                try:
++                    close_fn()
++                except Exception:
++                    pass
++
++        synthesized_tool_calls = []
++        for idx in sorted(tool_call_parts.keys()):
++            tc = tool_call_parts[idx]
++            if not tc["name"] and not tc["arguments"] and not tc["id"]:
++                continue
++            call_id = tc["id"] or f"call_{uuid.uuid4().hex[:12]}"
++            function_name = tc["name"] or "unknown_tool"
++            function_args = tc["arguments"] or "{}"
++            synthesized_tool_calls.append(
++                SimpleNamespace(
++                    id=call_id,
++                    function=SimpleNamespace(name=function_name, arguments=function_args),
++                )
++            )
++
++        reasoning_text = "".join(reasoning_parts).strip() or None
++        assistant_message = SimpleNamespace(
++            content="".join(content_parts),
++            tool_calls=synthesized_tool_calls if synthesized_tool_calls else None,
++            reasoning=reasoning_text,
++            reasoning_content=reasoning_text,
++            reasoning_details=(
++                [{"type": "reasoning", "text": reasoning_text}]
++                if reasoning_text
++                else None
++            ),
++        )
++        response_choice = SimpleNamespace(
++            message=assistant_message,
++            finish_reason=finish_reason,
++        )
++
++        return SimpleNamespace(
++            choices=[response_choice],
++            model=model_name,
++            usage=usage,
++        )
++
+     def _interruptible_api_call(self, api_kwargs: dict):
+         """
+         Run the API call in a background thread so the main conversation loop
+@@ -2000,6 +2199,8 @@ class AIAgent:
+             try:
+                 if self.api_mode == "codex_responses":
+                     result["response"] = self._run_codex_stream(api_kwargs)
++                elif self.stream_chat_completions:
++                    result["response"] = self._stream_chat_completions_call(api_kwargs)
+                 else:
+                     result["response"] = self.client.chat.completions.create(**api_kwargs)
+             except Exception as e:
+@@ -2894,12 +3095,17 @@ class AIAgent:
+             
+             # Thinking spinner for quiet mode (animated during API call)
+             thinking_spinner = None
++            stream_in_quiet_mode = (
++                self.api_mode == "chat_completions"
++                and self.stream_chat_completions
++                and self.quiet_mode
++            )
+             
+             if not self.quiet_mode:
+                 print(f"\n{self.log_prefix}🔄 Making API call #{api_call_count}/{self.max_iterations}...")
+                 print(f"{self.log_prefix}   📊 Request size: {len(api_messages)} messages, ~{approx_tokens:,} tokens (~{total_chars:,} chars)")
+                 print(f"{self.log_prefix}   🔧 Available tools: {len(self.tools) if self.tools else 0}")
+-            else:
++            elif not stream_in_quiet_mode:
+                 # Animated thinking spinner in quiet mode
+                 face = random.choice(KawaiiSpinner.KAWAII_THINKING)
+                 verb = random.choice(KawaiiSpinner.THINKING_VERBS)
