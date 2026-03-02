@@ -25,6 +25,12 @@ export interface OpenAIChatResponseChoice {
   message: {
     role: "assistant";
     content: string;
+    reasoning?: string;
+    reasoning_content?: string;
+    reasoning_details?: Array<{
+      type: string;
+      text: string;
+    }>;
   };
   finish_reason: "stop" | "length" | "content_filter" | null;
 }
@@ -45,6 +51,12 @@ export interface OpenAIChatResponse {
 export interface OpenAIChatChunkDelta {
   role?: "assistant";
   content?: string;
+  reasoning?: string;
+  reasoning_content?: string;
+  reasoning_details?: Array<{
+    type: string;
+    text: string;
+  }>;
 }
 
 export interface OpenAIChatChunkChoice {

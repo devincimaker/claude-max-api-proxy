@@ -36,6 +36,7 @@ Your App (Clawdbot, etc.)
 
 - **OpenAI-compatible API** — Works with any client that supports OpenAI's API format
 - **Streaming support** — Real-time token streaming via Server-Sent Events
+- **Reasoning passthrough** — Exposes Claude thinking blocks as OpenAI-style `reasoning` deltas/fields
 - **Multiple models** — Claude Opus, Sonnet, and Haiku
 - **Session management** — Maintains conversation context
 - **Auto-start service** — Optional LaunchAgent for macOS
@@ -109,6 +110,13 @@ curl -N -X POST http://localhost:3456/v1/chat/completions \
 | `/health` | GET | Health check |
 | `/v1/models` | GET | List available models |
 | `/v1/chat/completions` | POST | Chat completions (streaming & non-streaming) |
+
+### Reasoning / Thinking Compatibility
+
+This proxy forwards Claude thinking output in OpenAI-compatible extensions so clients like Hermes can display reasoning traces:
+
+- Streaming chunks include `choices[0].delta.reasoning` and `choices[0].delta.reasoning_content`
+- Non-stream responses include `choices[0].message.reasoning`, `reasoning_content`, and `reasoning_details`
 
 ## Available Models
 

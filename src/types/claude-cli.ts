@@ -36,10 +36,26 @@ export interface ClaudeCliHookResponse {
   outcome: "success" | "error";
 }
 
-export interface ClaudeCliAssistantContent {
+export interface ClaudeCliAssistantTextContent {
   type: "text";
   text: string;
 }
+
+export interface ClaudeCliAssistantThinkingContent {
+  type: "thinking";
+  thinking: string;
+  signature?: string;
+}
+
+export interface ClaudeCliAssistantRedactedThinkingContent {
+  type: "redacted_thinking";
+  data?: string;
+}
+
+export type ClaudeCliAssistantContent =
+  | ClaudeCliAssistantTextContent
+  | ClaudeCliAssistantThinkingContent
+  | ClaudeCliAssistantRedactedThinkingContent;
 
 export interface ClaudeCliAssistant {
   type: "assistant";
@@ -98,10 +114,26 @@ export interface ClaudeCliStreamEvent {
     delta?: {
       type: "text_delta";
       text: string;
+    } | {
+      type: "thinking_delta";
+      thinking: string;
+    } | {
+      type: "summary_text_delta";
+      text: string;
+    } | {
+      type: "signature_delta";
+      signature: string;
     };
     content_block?: {
       type: "text";
       text: string;
+    } | {
+      type: "thinking";
+      thinking: string;
+      signature?: string;
+    } | {
+      type: "redacted_thinking";
+      data?: string;
     };
     message?: {
       model: string;
@@ -142,6 +174,21 @@ export function isStreamEvent(msg: ClaudeCliMessage): msg is ClaudeCliStreamEven
 
 export function isContentDelta(msg: ClaudeCliMessage): msg is ClaudeCliStreamEvent {
   return isStreamEvent(msg) && msg.event.type === "content_block_delta";
+}
+
+export function extractTextDelta(msg: ClaudeCliStreamEvent): string | null {
+  const delta = msg.event.delta;
+  if (!delta) return null;
+  if (delta.type === "text_delta") return delta.text;
+  return null;
+}
+
+export function extractThinkingDelta(msg: ClaudeCliStreamEvent): string | null {
+  const delta = msg.event.delta;
+  if (!delta) return null;
+  if (delta.type === "thinking_delta") return delta.thinking;
+  if (delta.type === "summary_text_delta") return delta.text;
+  return null;
 }
 
 export function isSystemInit(msg: ClaudeCliMessage): msg is ClaudeCliInit {

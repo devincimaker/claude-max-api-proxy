@@ -14,6 +14,7 @@ import {
 } from "../adapter/cli-to-openai.js";
 import type { OpenAIChatRequest } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
+import { extractTextDelta, extractThinkingDelta } from "../types/claude-cli.js";
 
 /**
  * Handle POST /v1/chat/completions
@@ -109,8 +110,10 @@ async function handleStreamingResponse(
 
     // Handle streaming content deltas
     subprocess.on("content_delta", (event: ClaudeCliStreamEvent) => {
-      const text = event.event.delta?.text || "";
-      if (text && !res.writableEnded) {
+      const text = extractTextDelta(event);
+      const reasoning = extractThinkingDelta(event);
+
+      if ((text || reasoning) && !res.writableEnded) {
         const chunk = {
           id: `chatcmpl-${requestId}`,
           object: "chat.completion.chunk",
@@ -120,7 +123,9 @@ async function handleStreamingResponse(
             index: 0,
             delta: {
               role: isFirst ? "assistant" : undefined,
-              content: text,
+              content: text || undefined,
+              reasoning: reasoning || undefined,
+              reasoning_content: reasoning || undefined,
             },
             finish_reason: null,
           }],
@@ -197,9 +202,14 @@ async function handleNonStreamingResponse(
 ): Promise<void> {
   return new Promise((resolve) => {
     let finalResult: ClaudeCliResult | null = null;
+    let lastAssistantMessage: ClaudeCliAssistant | undefined;
 
     subprocess.on("result", (result: ClaudeCliResult) => {
       finalResult = result;
+    });
+
+    subprocess.on("assistant", (message: ClaudeCliAssistant) => {
+      lastAssistantMessage = message;
     });
 
     subprocess.on("error", (error: Error) => {
@@ -216,7 +226,7 @@ async function handleNonStreamingResponse(
 
     subprocess.on("close", (code: number | null) => {
       if (finalResult) {
-        res.json(cliResultToOpenai(finalResult, requestId));
+        res.json(cliResultToOpenai(finalResult, requestId, lastAssistantMessage));
       } else if (!res.headersSent) {
         res.status(500).json({
           error: {

@@ -16,6 +16,16 @@ export function extractTextContent(message: ClaudeCliAssistant): string {
 }
 
 /**
+ * Extract thinking content from Claude CLI assistant message
+ */
+export function extractThinkingContent(message: ClaudeCliAssistant): string {
+  return message.message.content
+    .filter((c) => c.type === "thinking")
+    .map((c) => c.thinking)
+    .join("");
+}
+
+/**
  * Convert Claude CLI assistant message to OpenAI streaming chunk
  */
 export function cliToOpenaiChunk(
@@ -24,6 +34,7 @@ export function cliToOpenaiChunk(
   isFirst: boolean = false
 ): OpenAIChatChunk {
   const text = extractTextContent(message);
+  const reasoning = extractThinkingContent(message);
 
   return {
     id: `chatcmpl-${requestId}`,
@@ -35,7 +46,9 @@ export function cliToOpenaiChunk(
         index: 0,
         delta: {
           role: isFirst ? "assistant" : undefined,
-          content: text,
+          content: text || undefined,
+          reasoning: reasoning || undefined,
+          reasoning_content: reasoning || undefined,
         },
         finish_reason: message.message.stop_reason ? "stop" : null,
       },
@@ -67,12 +80,16 @@ export function createDoneChunk(requestId: string, model: string): OpenAIChatChu
  */
 export function cliResultToOpenai(
   result: ClaudeCliResult,
-  requestId: string
+  requestId: string,
+  assistantMessage?: ClaudeCliAssistant
 ): OpenAIChatResponse {
   // Get model from modelUsage or default
   const modelName = result.modelUsage
     ? Object.keys(result.modelUsage)[0]
     : "claude-sonnet-4";
+  const reasoning = assistantMessage
+    ? extractThinkingContent(assistantMessage)
+    : "";
 
   return {
     id: `chatcmpl-${requestId}`,
@@ -85,6 +102,11 @@ export function cliResultToOpenai(
         message: {
           role: "assistant",
           content: result.result,
+          reasoning: reasoning || undefined,
+          reasoning_content: reasoning || undefined,
+          reasoning_details: reasoning
+            ? [{ type: "reasoning", text: reasoning }]
+            : undefined,
         },
         finish_reason: "stop",
       },
