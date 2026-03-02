@@ -81,15 +81,13 @@ export function createDoneChunk(requestId: string, model: string): OpenAIChatChu
 export function cliResultToOpenai(
   result: ClaudeCliResult,
   requestId: string,
-  assistantMessage?: ClaudeCliAssistant
+  reasoningText?: string
 ): OpenAIChatResponse {
   // Get model from modelUsage or default
   const modelName = result.modelUsage
     ? Object.keys(result.modelUsage)[0]
     : "claude-sonnet-4";
-  const reasoning = assistantMessage
-    ? extractThinkingContent(assistantMessage)
-    : "";
+  const reasoning = reasoningText || "";
 
   return {
     id: `chatcmpl-${requestId}`,

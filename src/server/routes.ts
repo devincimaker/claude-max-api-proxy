@@ -11,6 +11,7 @@ import { openaiToCli } from "../adapter/openai-to-cli.js";
 import {
   cliResultToOpenai,
   createDoneChunk,
+  extractThinkingContent,
 } from "../adapter/cli-to-openai.js";
 import type { OpenAIChatRequest } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
@@ -202,14 +203,17 @@ async function handleNonStreamingResponse(
 ): Promise<void> {
   return new Promise((resolve) => {
     let finalResult: ClaudeCliResult | null = null;
-    let lastAssistantMessage: ClaudeCliAssistant | undefined;
+    const reasoningParts: string[] = [];
 
     subprocess.on("result", (result: ClaudeCliResult) => {
       finalResult = result;
     });
 
     subprocess.on("assistant", (message: ClaudeCliAssistant) => {
-      lastAssistantMessage = message;
+      const reasoning = extractThinkingContent(message);
+      if (reasoning) {
+        reasoningParts.push(reasoning);
+      }
     });
 
     subprocess.on("error", (error: Error) => {
@@ -226,7 +230,8 @@ async function handleNonStreamingResponse(
 
     subprocess.on("close", (code: number | null) => {
       if (finalResult) {
-        res.json(cliResultToOpenai(finalResult, requestId, lastAssistantMessage));
+        const combinedReasoning = reasoningParts.join("\n\n");
+        res.json(cliResultToOpenai(finalResult, requestId, combinedReasoning));
       } else if (!res.headersSent) {
         res.status(500).json({
           error: {
