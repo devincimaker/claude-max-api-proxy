@@ -1,5 +1,5 @@
 {
-  "name": "@devincimaker/claude-max-api-proxy",
+  "name": "@devimaker/claude-max-api-proxy",
   "version": "1.0.1",
   "description": "Use your Claude Max subscription with any OpenAI-compatible client. Wraps Claude Code CLI as an OpenAI-compatible API server.",
   "type": "module",
